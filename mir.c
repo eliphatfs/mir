@@ -6057,8 +6057,11 @@ void _MIR_dump_code (const char *name, int index, uint8_t *code, size_t code_len
 #endif
 
 /* New Page */
-
+#if MIR_DAP
+#include "dap/mir-interp-dap.c"
+#else
 #include "mir-interp.c"
+#endif
 
 /* Local Variables:                */
 /* mode: c                         */
