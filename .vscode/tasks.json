@@ -6,7 +6,7 @@
         {
             "label": "Build DAP",
             "type": "shell",
-            "command": "gcc -g -Og mir.c -o mir-intp-dap.exe -DMIR_DAP -DMIR_DIRECT_DISPATCH -I.",
+            "command": "gcc -g -Og mir.c ./dap/cJSON.c -o mir-intp-dap.exe -DMIR_DAP -DMIR_DIRECT_DISPATCH -I.",
             "problemMatcher": [
                 "$gcc"
             ]

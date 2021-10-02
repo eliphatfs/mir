@@ -129,7 +129,7 @@ static void push_insn_start (struct interp_ctx *interp_ctx, int code, MIR_insn_t
 
   get_icode (interp_ctx, &v, code);
   VARR_PUSH (MIR_val_t, code_varr, v);
-#if MIR_INTERP_TRACE
+#if MIR_INTERP_TRACE || MIR_DAP
   v.a = original_insn;
   VARR_PUSH (MIR_val_t, code_varr, v);
 #endif
@@ -438,7 +438,7 @@ static void generate_icode (MIR_context_t ctx, MIR_item_t func_item) {
     for (n = start_label_nop; n < bound_label_nop; n++) {
       label = insn->ops[n].u.label;
       v.i = (size_t) label->data;
-#if MIR_INTERP_TRACE
+#if MIR_INTERP_TRACE || MIR_DAP
       VARR_SET (MIR_val_t, code_varr, (size_t) insn->data + n + start_label_loc + 1, v);
 #else
       VARR_SET (MIR_val_t, code_varr, (size_t) insn->data + n + start_label_loc, v);
@@ -771,7 +771,9 @@ static ALWAYS_INLINE int64_t get_mem_addr (MIR_val_t *bp, code_t c) { return bp[
 static void call (MIR_context_t ctx, MIR_val_t *bp, MIR_op_t *insn_arg_ops, code_t ffi_address_ptr,
                   MIR_item_t proto_item, void *addr, code_t res_ops, size_t nargs);
 
-#if MIR_INTERP_TRACE
+#if MIR_DAP
+#include "dap-driver.i"
+#elif MIR_INTERP_TRACE
 static void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc,
                               size_t nops) {
   struct interp_ctx *interp_ctx = ctx->interp_ctx;
@@ -875,7 +877,7 @@ static void OPTIMIZE eval (MIR_context_t ctx, func_desc_t func_desc, MIR_val_t *
   struct interp_ctx *interp_ctx = ctx->interp_ctx;
   code_t pc, ops, code;
 
-#if MIR_INTERP_TRACE
+#if MIR_INTERP_TRACE || MIR_DAP
   MIR_full_insn_code_t trace_insn_code;
 #define START_INSN(v, nops)                          \
   do {                                               \
@@ -1749,8 +1751,3 @@ void MIR_set_interp_interface (MIR_context_t ctx, MIR_item_t func_item) {
 }
 
 #endif /* #ifdef MIR_NO_INTERP */
-
-
-int main() {
-  return 0;
-}
