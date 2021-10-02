@@ -2253,6 +2253,9 @@ void MIR_append_insn (MIR_context_t ctx, MIR_item_t func_item, MIR_insn_t insn) 
   mir_assert (func_item != NULL);
   if (func_item->item_type != MIR_func_item)
     MIR_get_error_func (ctx) (MIR_wrong_param_value_error, "MIR_append_insn: wrong func item");
+#if MIR_DAP
+  insn->src_lno = ctx->scan_ctx ? ctx->scan_ctx->curr_lno : 0;
+#endif
   DLIST_APPEND (MIR_insn_t, func_item->u.func->insns, insn);
 }
 

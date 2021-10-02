@@ -298,6 +298,9 @@ struct MIR_insn {
   MIR_insn_code_t code : 32;
   unsigned int nops : 32; /* number of operands */
   MIR_op_t ops[1];
+#if MIR_DAP
+  int src_lno;
+#endif
 };
 
 /* Definition of double list of insns */
