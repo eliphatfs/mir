@@ -1749,3 +1749,8 @@ void MIR_set_interp_interface (MIR_context_t ctx, MIR_item_t func_item) {
 }
 
 #endif /* #ifdef MIR_NO_INTERP */
+
+
+int main() {
+  return 0;
+}
