@@ -2249,16 +2249,6 @@ htab_hash_t MIR_op_hash_step (MIR_context_t ctx, htab_hash_t h, MIR_op_t op) {
   return h;
 }
 
-void MIR_append_insn (MIR_context_t ctx, MIR_item_t func_item, MIR_insn_t insn) {
-  mir_assert (func_item != NULL);
-  if (func_item->item_type != MIR_func_item)
-    MIR_get_error_func (ctx) (MIR_wrong_param_value_error, "MIR_append_insn: wrong func item");
-#if MIR_DAP
-  insn->src_lno = ctx->scan_ctx ? ctx->scan_ctx->curr_lno : 0;
-#endif
-  DLIST_APPEND (MIR_insn_t, func_item->u.func->insns, insn);
-}
-
 void MIR_prepend_insn (MIR_context_t ctx, MIR_item_t func_item, MIR_insn_t insn) {
   mir_assert (func_item != NULL);
   if (func_item->item_type != MIR_func_item)
@@ -5938,6 +5928,16 @@ void MIR_scan_string (MIR_context_t ctx, const char *str) {
   }
   if (VARR_LENGTH (char, error_msg_buf) != 0)
     MIR_get_error_func (ctx) (MIR_syntax_error, VARR_ADDR (char, error_msg_buf));
+}
+
+void MIR_append_insn (MIR_context_t ctx, MIR_item_t func_item, MIR_insn_t insn) {
+  mir_assert (func_item != NULL);
+  if (func_item->item_type != MIR_func_item)
+    MIR_get_error_func (ctx) (MIR_wrong_param_value_error, "MIR_append_insn: wrong func item");
+#if MIR_DAP
+  insn->src_lno = ctx->scan_ctx ? curr_lno : 0;
+#endif
+  DLIST_APPEND (MIR_insn_t, func_item->u.func->insns, insn);
 }
 
 static void scan_init (MIR_context_t ctx) {
