@@ -21,6 +21,7 @@
 #define dup2 _dup2
 #define read _read
 #define write _write
+#define sleep Sleep
 #endif
 
 typedef struct {
@@ -42,6 +43,9 @@ static DAP_redirect_t DAP_redirect(FILE * old) {
   int res;
 
   redr.fd[2] = dup(fileno(std_io));
+#ifdef _WIN32
+  _setmode(redr.fd[2], _O_BINARY);
+#endif
 
   res = pipe(redr.fd);
   assert(res == 0);
@@ -51,6 +55,7 @@ static DAP_redirect_t DAP_redirect(FILE * old) {
   return redr;
 }
 
+/*
 static cJSON * DAP_next_message() {
   static char content[255];
   if (!gets(content))
@@ -65,6 +70,7 @@ static cJSON * DAP_next_message() {
   free(command);
   return jo;
 }
+*/
 
 void DAP_send_output(const cJSON * json) {
   char* outp = cJSON_PrintUnformatted(json);
@@ -131,15 +137,56 @@ static int DAP_handle_request(cJSON * req) {
   const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItem(req, "command"));
   if (strcmp(cmd, "initialize")) {
     return DAP_respond_dispose(req, 1, cJSON_CreateObject())
-         | DAP_send_output_dispose(DAP_create_event("initialized", NULL));
+        || DAP_send_output_dispose(DAP_create_event("initialized", NULL));
   }
 }
 #undef END_RESP
 
 static void * DAP_handle_stdin(void * arg) {
+  static char head_buf[42];
+  read(redir[0].fd[2], head_buf, 16);
+  head_buf[16] = '\0';
+  assert(strcmp(head_buf, "Content-Length: ") == 0);
+  for (int p = 0; p < 39; p++)
+  {
+    read(redir[0].fd[2], head_buf + p, 1);
+    if (head_buf[p] == '\n')
+    {
+      head_buf[p + 1] = '\0';
+      break;
+    }
+  }
+  int size_body;
+  sscanf(head_buf, "%d", &size_body);
+  do {
+    read(redir[0].fd[2], head_buf, 1);
+  } while (head_buf[0] != '\n');
+  char* body = malloc(size_body + 1);
+  assert(body);
+  read(redir[0].fd[2], body, size_body);
+  body[size_body] = '\0';
+  cJSON * jo = cJSON_Parse(body);
+  free(body);
+  return jo;
 }
 
 static void * DAP_handle_stdout(void * arg) {
+  static char buffer[4097];
+  int bufread = 8;
+  while (1) {
+    int nc = read(redir[1].fd[0], buffer, bufread);
+    if (nc > 0) {
+      buffer[nc] = '\0';
+      cJSON * body = cJSON_CreateObject();
+      cJSON_AddItemToObject(body, "category", cJSON_CreateString("stdout"));
+      cJSON_AddItemToObject(body, "output", cJSON_CreateString(buffer));
+      DAP_send_output_dispose(DAP_create_event("output", body));
+    }
+    if (nc == bufread && bufread < 4096)
+      bufread *= 2;
+    else
+      bufread = 8;
+  }
 }
 
 /*
@@ -163,6 +210,8 @@ int main(int argc, const char ** argv) {
   pthread_join(threads[0], NULL);
   pthread_join(threads[1], NULL);
   pthread_join(threads[2], NULL); */
+  printf("TESTAB\n");
+  sleep(1000);
   return 0;
 }
 #endif
