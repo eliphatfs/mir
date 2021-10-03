@@ -36,7 +36,7 @@ static DAP_redirect_t redir[3];  /* STDIN, STDOUT, STDERR (STDERR not redirected
 #define MUT_CA_TRACE mutex[2]
 #define COND_CA cond[0]
 
-static DAP_redirect_t DAP_redirect(FILE * old) {
+static DAP_redirect_t DAP_redirect(FILE * old, int dup2_id) {
   FILE* std_io = (FILE*)(old);
   char buf[256];
   DAP_redirect_t redr;
@@ -50,8 +50,9 @@ static DAP_redirect_t DAP_redirect(FILE * old) {
   res = pipe(redr.fd);
   assert(res == 0);
 
-  res = dup2(redr.fd[1], fileno(std_io));
+  res = dup2(redr.fd[dup2_id], fileno(std_io));
   assert(res != -1);
+  setvbuf(std_io, NULL, _IONBF, 0);
   return redr;
 }
 
@@ -76,8 +77,8 @@ void DAP_send_output(const cJSON * json) {
   char* outp = cJSON_PrintUnformatted(json);
   int len_outp = strlen(outp);
   static char head_buf[42];
-  sprintf(head_buf, "Content-Length: %d\r\n\r\n", len_outp);
   pthread_mutex_lock(&MUT_O);
+  sprintf(head_buf, "Content-Length: %d\r\n\r\n", len_outp);
   write(redir[1].fd[2], head_buf, strlen(head_buf));
   write(redir[1].fd[2], outp, len_outp);
   pthread_mutex_unlock(&MUT_O);
@@ -114,8 +115,8 @@ static cJSON * DAP_create_event(const char* event_kind, cJSON * body) {
 static cJSON * DAP_create_response(cJSON * req, int success, cJSON * body_or_error) {
   cJSON * obj = DAP_create_message("response");
   cJSON_AddItemToObject(obj, "success", cJSON_CreateBool(success));
-  cJSON_AddItemToObject(obj, "command", cJSON_GetObjectItem(req, "command"));
-  cJSON_AddItemToObject(obj, "request_seq", cJSON_GetObjectItem(req, "seq"));
+  cJSON_AddItemReferenceToObject(obj, "command", cJSON_GetObjectItem(req, "command"));
+  cJSON_AddItemReferenceToObject(obj, "request_seq", cJSON_GetObjectItem(req, "seq"));
   if (body_or_error)
   {
     if (success)
@@ -135,7 +136,7 @@ static int DAP_respond_dispose(cJSON * req, int success, cJSON * body_or_error)
 
 static int DAP_handle_request(cJSON * req) {
   const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItem(req, "command"));
-  if (strcmp(cmd, "initialize")) {
+  if (strcmp(cmd, "initialize") == 0) {
     return DAP_respond_dispose(req, 1, cJSON_CreateObject())
         || DAP_send_output_dispose(DAP_create_event("initialized", NULL));
   }
@@ -146,7 +147,8 @@ static int DAP_handle_request(cJSON * req) {
 static void * DAP_handle_stdin(void * arg) {
   static char head_buf[42];
   while (1) {
-    read(redir[0].fd[2], head_buf, 16);
+    if (read(redir[0].fd[2], head_buf, 16) == 0)
+      break;
     head_buf[16] = '\0';
     assert(strcmp(head_buf, "Content-Length: ") == 0);
     for (int p = 0; p < 39; p++)
@@ -204,16 +206,20 @@ int main(int argc, const char ** argv) {
     pthread_mutex_init(mutex + i, NULL);
     pthread_cond_init(cond + i, NULL);
   }
-  redir[0] = DAP_redirect(stdin);
-  redir[1] = DAP_redirect(stdout);
+  redir[0] = DAP_redirect(stdin, 0);
+  redir[1] = DAP_redirect(stdout, 1);
   pthread_create(threads + 0, NULL, DAP_handle_stdin, NULL);
   pthread_create(threads + 1, NULL, DAP_handle_stdout, NULL);
   /* pthread_create(threads + 2, NULL, DAP_handle_stderr, NULL);
-  pthread_join(threads[0], NULL);
-  pthread_join(threads[1], NULL);
   pthread_join(threads[2], NULL); */
-  printf("TESTAB\n");
   sleep(1000);
+  write(fileno(stdout), "write\n", 6);
+  fputs("fputs\n", stdout);
+  fprintf(stdout, "fprintf");
+  // write(redir[1].fd[1], "2222222222\n", redir[1].fd[1]);
+  pthread_join(threads[0], NULL);
+  sleep(1000);
+  pthread_cancel(threads[1]);
   DAP_send_output_dispose(DAP_create_event("terminated", NULL));
   DAP_send_output_dispose(DAP_create_event("exited", cJSON_CreateRaw("{\"exitCode\": 0}")));
   return 0;
