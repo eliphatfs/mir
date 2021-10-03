@@ -139,35 +139,37 @@ static int DAP_handle_request(cJSON * req) {
     return DAP_respond_dispose(req, 1, cJSON_CreateObject())
         || DAP_send_output_dispose(DAP_create_event("initialized", NULL));
   }
+  return -2;
 }
 #undef END_RESP
 
 static void * DAP_handle_stdin(void * arg) {
   static char head_buf[42];
-  read(redir[0].fd[2], head_buf, 16);
-  head_buf[16] = '\0';
-  assert(strcmp(head_buf, "Content-Length: ") == 0);
-  for (int p = 0; p < 39; p++)
-  {
-    read(redir[0].fd[2], head_buf + p, 1);
-    if (head_buf[p] == '\n')
+  while (1) {
+    read(redir[0].fd[2], head_buf, 16);
+    head_buf[16] = '\0';
+    assert(strcmp(head_buf, "Content-Length: ") == 0);
+    for (int p = 0; p < 39; p++)
     {
-      head_buf[p + 1] = '\0';
-      break;
+      read(redir[0].fd[2], head_buf + p, 1);
+      if (head_buf[p] == '\n')
+      {
+        head_buf[p + 1] = '\0';
+        break;
+      }
     }
+    int size_body;
+    sscanf(head_buf, "%d", &size_body);
+    do {
+      read(redir[0].fd[2], head_buf, 1);
+    } while (head_buf[0] != '\n');
+    char* body = malloc(size_body + 1);
+    assert(body);
+    read(redir[0].fd[2], body, size_body);
+    body[size_body] = '\0';
+    DAP_handle_request(cJSON_Parse(body));
+    free(body);
   }
-  int size_body;
-  sscanf(head_buf, "%d", &size_body);
-  do {
-    read(redir[0].fd[2], head_buf, 1);
-  } while (head_buf[0] != '\n');
-  char* body = malloc(size_body + 1);
-  assert(body);
-  read(redir[0].fd[2], body, size_body);
-  body[size_body] = '\0';
-  cJSON * jo = cJSON_Parse(body);
-  free(body);
-  return jo;
 }
 
 static void * DAP_handle_stdout(void * arg) {
@@ -212,6 +214,8 @@ int main(int argc, const char ** argv) {
   pthread_join(threads[2], NULL); */
   printf("TESTAB\n");
   sleep(1000);
+  DAP_send_output_dispose(DAP_create_event("terminated", NULL));
+  DAP_send_output_dispose(DAP_create_event("exited", cJSON_CreateRaw("{\"exitCode\": 0}")));
   return 0;
 }
 #endif
