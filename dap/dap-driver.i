@@ -78,7 +78,7 @@ void DAP_send_output(const cJSON * json) {
   cJSON_free(outp);
 }
 
-int DAP_send_output_and_free(cJSON * json) {
+int DAP_send_output_dispose(cJSON * json) {
   DAP_send_output(json);
   cJSON_Delete(json);
   return 0;
@@ -108,8 +108,8 @@ static cJSON * DAP_create_event(const char* event_kind, cJSON * body) {
 static cJSON * DAP_create_response(cJSON * req, int success, cJSON * body_or_error) {
   cJSON * obj = DAP_create_message("response");
   cJSON_AddItemToObject(obj, "success", cJSON_CreateBool(success));
-  cJSON_AddItemToObject(obj, "command", cJSON_GetStringValue(cJSON_GetObjectItem(req, "command")));
-  cJSON_AddItemToObject(obj, "request_seq", (int)(0.5 + cJSON_GetNumberValue(cJSON_GetObjectItem(req, "seq"))));
+  cJSON_AddItemToObject(obj, "command", cJSON_GetObjectItem(req, "command"));
+  cJSON_AddItemToObject(obj, "request_seq", cJSON_GetObjectItem(req, "seq"));
   if (body_or_error)
   {
     if (success)
@@ -122,7 +122,7 @@ static cJSON * DAP_create_response(cJSON * req, int success, cJSON * body_or_err
 
 static int DAP_respond_dispose(cJSON * req, int success, cJSON * body_or_error)
 {
-  DAP_send_output_and_free(DAP_create_response(req, success, body_or_error));
+  DAP_send_output_dispose(DAP_create_response(req, success, body_or_error));
   cJSON_Delete(req);
   return 0;
 }
@@ -130,6 +130,8 @@ static int DAP_respond_dispose(cJSON * req, int success, cJSON * body_or_error)
 static int DAP_handle_request(cJSON * req) {
   const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItem(req, "command"));
   if (strcmp(cmd, "initialize")) {
+    return DAP_respond_dispose(req, 1, cJSON_CreateObject())
+         | DAP_send_output_dispose(DAP_create_event("initialized", NULL));
   }
 }
 #undef END_RESP
