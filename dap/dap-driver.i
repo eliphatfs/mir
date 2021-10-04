@@ -75,7 +75,7 @@ static cJSON * DAP_next_message() {
 */
 
 void DAP_send_output(const cJSON * json) {
-  char* outp = cJSON_PrintUnformatted(json);
+  char* outp = cJSON_Print(json);
   int len_outp = strlen(outp);
   static char head_buf[42];
   pthread_mutex_lock(&MUT_O);
@@ -83,6 +83,8 @@ void DAP_send_output(const cJSON * json) {
   write(redir[1].fd[2], head_buf, strlen(head_buf));
   write(redir[1].fd[2], outp, len_outp);
   pthread_mutex_unlock(&MUT_O);
+  fprintf(stderr, "< %s\n", outp);
+  fflush(stderr);
   cJSON_free(outp);
 }
 
@@ -138,15 +140,21 @@ static void DAP_output_event(const char* cat, const char * msg)
   DAP_send_output_dispose(DAP_create_event("output", body));
 }
 
-volatile char dap_wait_on_next_insn_p = 0;
+volatile char dap_wait_on_next_insn_p = 1;
+volatile int wait_line = 1;
 char const* dap_wait_reason = "entry";
+char const* wait_filename = "";
+char const* wait_filepath = "";
 void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc, size_t nops)
 {
   if (dap_wait_on_next_insn_p)
   {
     dap_wait_on_next_insn_p = 0;
+    wait_line = ((MIR_insn_t)pc[1].a)->src_lno;
+    /* printf("%s\n", name); */
     cJSON * body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "reason", dap_wait_reason);
+    cJSON_AddNumberToObject(body, "threadId", 0);
     DAP_send_output_dispose(DAP_create_event("stopped", body));
     pthread_mutex_lock(&MUT_CA_TRACE);
     pthread_cond_wait(&COND_CA, &MUT_CA_TRACE);
@@ -157,7 +165,7 @@ void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_des
 static int DAP_handle_request(cJSON * req) {
   const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItem(req, "command"));
   char * ret = cJSON_Print(req);
-  fprintf(stderr, "%s\n", ret);
+  fprintf(stderr, "> %s\n", ret);
   fflush(stderr);
   cJSON_free(ret);
   if (strcmp(cmd, "next") == 0) {
@@ -183,13 +191,28 @@ static int DAP_handle_request(cJSON * req) {
     assert(0);  /* TODO: IMPLEMENT */
   }
   if (strcmp(cmd, "scopes") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    cJSON * body = cJSON_CreateObject();
+    cJSON * scopes = cJSON_AddArrayToObject(body, "scopes");
+    /* TODO: IMPLEMENT */
+    return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "stackTrace") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    cJSON * body = cJSON_CreateObject();
+    cJSON * stackFrames = cJSON_AddArrayToObject(body, "stackFrames");
+    cJSON_AddNumberToObject(body, "totalFrames", 1);
+    cJSON * frame = cJSON_CreateObject();
+    cJSON_AddItemToArray(stackFrames, frame);
+    cJSON_AddNumberToObject(frame, "line", wait_line);
+    cJSON_AddNumberToObject(frame, "column", 0);
+    cJSON_AddNumberToObject(frame, "id", 1000);
+    cJSON_AddStringToObject(frame, "name", "<top>");
+    cJSON * src = cJSON_AddObjectToObject(frame, "source");
+    cJSON_AddStringToObject(src, "name", wait_filename);
+    cJSON_AddStringToObject(src, "path", wait_filepath);
+    return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "threads") == 0) {
-    /* TODO: IMPLEMENT */
+    return DAP_respond_dispose(req, 1, cJSON_CreateRaw("{\"threads\": [{\"id\": 0, \"name\": \"main\"}]}"));
   }
   if (strcmp(cmd, "pause") == 0) {
     dap_wait_reason = "pause";
@@ -327,6 +350,11 @@ int main(int argc, const char ** argv) {
   /* pthread_create(threads + 2, NULL, DAP_handle_stderr, NULL);
   pthread_join(threads[2], NULL); */
   FILE * fp = fopen(argv[argc - 1], "r");
+  wait_filepath = argv[argc - 1];
+  wait_filename =
+    strrchr(wait_filepath, '\\') ? strrchr(wait_filepath, '\\') :
+    strrchr(wait_filepath, '/') ? strrchr(wait_filepath, '/') :
+    wait_filepath;
   if (fp == NULL) { DAP_handle_error(MIR_binary_io_error, "Cannot open file `%s`\n", argv[argc - 1]); }
   
   fseek(fp, 0, SEEK_END); 
