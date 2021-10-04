@@ -772,6 +772,7 @@ static void call (MIR_context_t ctx, MIR_val_t *bp, MIR_op_t *insn_arg_ops, code
                   MIR_item_t proto_item, void *addr, code_t res_ops, size_t nargs);
 
 #if MIR_DAP
+#include "cstd-link-resolve.i"
 #include "dap-driver.i"
 #elif MIR_INTERP_TRACE
 static void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc,
