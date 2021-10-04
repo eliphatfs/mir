@@ -130,6 +130,14 @@ static int DAP_respond_dispose(cJSON * req, int success, cJSON * body_or_error)
   return 0;
 }
 
+static void DAP_output_event(const char* cat, const char * msg)
+{
+  cJSON * body = cJSON_CreateObject();
+  cJSON_AddItemToObject(body, "category", cJSON_CreateString(cat));
+  cJSON_AddItemToObject(body, "output", cJSON_CreateString(msg));
+  DAP_send_output_dispose(DAP_create_event("output", body));
+}
+
 volatile char dap_wait_on_next_insn_p = 0;
 char const* dap_wait_reason = "entry";
 void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc, size_t nops)
@@ -268,10 +276,7 @@ static void * DAP_handle_stdout(void * arg) {
     int nc = read(redir[1].fd[0], buffer, bufread);
     if (nc > 0) {
       buffer[nc] = '\0';
-      cJSON * body = cJSON_CreateObject();
-      cJSON_AddItemToObject(body, "category", cJSON_CreateString("stdout"));
-      cJSON_AddItemToObject(body, "output", cJSON_CreateString(buffer));
-      DAP_send_output_dispose(DAP_create_event("output", body));
+      DAP_output_event("stdout", buffer);
     }
     if (nc == bufread)
     {
@@ -290,10 +295,13 @@ static void * DAP_handle_stderr(void * arg) {
 
 void MIR_NO_RETURN DAP_handle_error(enum MIR_error_type error_type, const char *format, ...) {
   va_list ap;
+  static char buf[32767];
 
   va_start(ap, format);
-  vprintf(format, ap);
-  printf("\n");
+  int x = vsnprintf(buf, 32764, format, ap);
+  buf[x] = '\n';
+  buf[x + 1] = '\0';
+  DAP_output_event("stderr", buf);
   va_end(ap);
 
   sleep(1000);
@@ -345,9 +353,9 @@ int main(int argc, const char ** argv) {
     MIR_load_module (ctx, module);
   }
   if (main_func == NULL) { DAP_handle_error(MIR_no_func_error, "No main func found"); }
-  printf("Loaded sucessfully\n");
+  DAP_output_event("stdout", "Loaded sucessfully\n");
   MIR_link(ctx, MIR_set_interp_interface, MIR_std_import_resolver);
-  printf("Linked sucessfully\n");
+  DAP_output_event("stdout", "Linked sucessfully\n");
   ((void (*)())(main_func->addr))();
 
   MIR_finish(ctx);
