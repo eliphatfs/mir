@@ -5515,6 +5515,7 @@ void MIR_scan_string (MIR_context_t ctx, const char *str) {
   int module_p, end_module_p, proto_p, func_p, end_func_p, dots_p, export_p, import_p, forward_p;
   int bss_p, ref_p, expr_p, string_p, local_p, push_op_p, read_p, disp_p;
   insn_name_t in, el;
+  size_t track_lno;
 
   VARR_TRUNC (char, error_msg_buf, 0);
   curr_lno = 1;
@@ -5534,6 +5535,7 @@ void MIR_scan_string (MIR_context_t ctx, const char *str) {
     for (;;) { /* label_names */
       if (t.code != TC_NAME) scan_error (ctx, "insn should start with label or insn name");
       name = t.u.name;
+      track_lno = curr_lno;
       scan_token (ctx, &t, get_string_char, unget_string_char);
       if (t.code != TC_COL) break;
       VARR_PUSH (label_name_t, label_names, name);
@@ -5920,6 +5922,9 @@ void MIR_scan_string (MIR_context_t ctx, const char *str) {
     } else {
       insn = MIR_new_insn_arr (ctx, insn_code, VARR_LENGTH (MIR_op_t, scan_insn_ops),
                                VARR_ADDR (MIR_op_t, scan_insn_ops));
+#if MIR_DAP
+      insn->src_lno = track_lno;
+#endif
       if (func != NULL) MIR_append_insn (ctx, func, insn);
     }
   }
@@ -5937,9 +5942,6 @@ void MIR_append_insn (MIR_context_t ctx, MIR_item_t func_item, MIR_insn_t insn) 
   mir_assert (func_item != NULL);
   if (func_item->item_type != MIR_func_item)
     MIR_get_error_func (ctx) (MIR_wrong_param_value_error, "MIR_append_insn: wrong func item");
-#if MIR_DAP
-  insn->src_lno = ctx->scan_ctx ? curr_lno : 0;
-#endif
   DLIST_APPEND (MIR_insn_t, func_item->u.func->insns, insn);
 }
 

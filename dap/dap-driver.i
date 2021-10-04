@@ -19,6 +19,7 @@
 #define fileno _fileno
 #define dup _dup
 #define dup2 _dup2
+#define close _close
 #define read _read
 #define write _write
 #define sleep Sleep
@@ -149,8 +150,9 @@ void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_des
 {
   if (dap_wait_on_next_insn_p)
   {
-    dap_wait_on_next_insn_p = 0;
     wait_line = ((MIR_insn_t)pc[1].a)->src_lno;
+    if (wait_line <= 0) return;
+    dap_wait_on_next_insn_p = 0;
     /* printf("%s\n", name); */
     cJSON * body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "reason", dap_wait_reason);
@@ -244,6 +246,7 @@ static int DAP_handle_request(cJSON * req) {
   }
   if (strcmp(cmd, "disconnect") == 0) {
     close_std_libs();
+    close(redir[1].fd[1]);
     DAP_respond_dispose(req, 1, cJSON_CreateObject());
     return 2;
   }
@@ -297,6 +300,7 @@ static void * DAP_handle_stdout(void * arg) {
   int bufread = 8;
   while (1) {
     int nc = read(redir[1].fd[0], buffer, bufread);
+    if (nc == 0) break;
     if (nc > 0) {
       buffer[nc] = '\0';
       DAP_output_event("stdout", buffer);
@@ -387,9 +391,12 @@ int main(int argc, const char ** argv) {
   ((void (*)())(main_func->addr))();
 
   MIR_finish(ctx);
-
-  sleep(1000);
   DAP_send_output_dispose(DAP_create_event("terminated", NULL));
+
+  close(redir[0].fd[2]);
+  close(redir[1].fd[1]);
+  pthread_join(threads[0], NULL);
+  pthread_join(threads[1], NULL);
   DAP_send_output_dispose(DAP_create_event("exited", cJSON_CreateRaw("{\"exitCode\": 0}")));
   return 0;
 }
