@@ -136,9 +136,56 @@ static int DAP_respond_dispose(cJSON * req, int success, cJSON * body_or_error)
 
 static int DAP_handle_request(cJSON * req) {
   const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItem(req, "command"));
+  if (strcmp(cmd, "next") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "stepIn") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "stepOut") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "continue") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "evaluate") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "variables") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "scopes") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "stackTrace") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "threads") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "pause") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "setBreakpoints") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
+  if (strcmp(cmd, "source") == 0) {
+    assert(0);  /* TODO: IMPLEMENT */
+  }
   if (strcmp(cmd, "initialize") == 0) {
     return DAP_respond_dispose(req, 1, cJSON_CreateObject())
         || DAP_send_output_dispose(DAP_create_event("initialized", NULL));
+  }
+  if (strcmp(cmd, "launch") == 0) {
+    return DAP_respond_dispose(req, 1, cJSON_CreateObject());
+  }
+  if (strcmp(cmd, "attach") == 0) {
+    return DAP_respond_dispose(req, 1, cJSON_CreateObject());
+  }
+  if (strcmp(cmd, "disconnect") == 0) {
+    close_std_libs();
+    DAP_respond_dispose(req, 1, cJSON_CreateObject());
+    return 2;
   }
   return -2;
 }
@@ -147,8 +194,11 @@ static int DAP_handle_request(cJSON * req) {
 static void * DAP_handle_stdin(void * arg) {
   static char head_buf[42];
   while (1) {
-    if (read(redir[0].fd[2], head_buf, 16) == 0)
-      break;
+    int hp = 0;
+    while (hp < 16) {
+      if (read(redir[0].fd[2], head_buf + hp, 16 - hp) == 0)
+        return NULL;
+    }
     head_buf[16] = '\0';
     assert(strcmp(head_buf, "Content-Length: ") == 0);
     for (int p = 0; p < 39; p++)
@@ -169,9 +219,14 @@ static void * DAP_handle_stdin(void * arg) {
     assert(body);
     read(redir[0].fd[2], body, size_body);
     body[size_body] = '\0';
-    DAP_handle_request(cJSON_Parse(body));
+    if (DAP_handle_request(cJSON_Parse(body)) == 2)
+    {
+      free(body);
+      break;
+    }
     free(body);
   }
+  return NULL;
 }
 
 static void * DAP_handle_stdout(void * arg) {
@@ -186,8 +241,10 @@ static void * DAP_handle_stdout(void * arg) {
       cJSON_AddItemToObject(body, "output", cJSON_CreateString(buffer));
       DAP_send_output_dispose(DAP_create_event("output", body));
     }
-    if (nc == bufread && bufread < 4096)
-      bufread *= 2;
+    if (nc == bufread)
+    {
+      if (bufread < 4096) bufread *= 2;
+    }
     else
       bufread = 8;
   }
@@ -208,6 +265,7 @@ int main(int argc, const char ** argv) {
   }
   redir[0] = DAP_redirect(stdin, 0);
   redir[1] = DAP_redirect(stdout, 1);
+  freopen("error.log", "a", stderr);
   pthread_create(threads + 0, NULL, DAP_handle_stdin, NULL);
   pthread_create(threads + 1, NULL, DAP_handle_stdout, NULL);
   /* pthread_create(threads + 2, NULL, DAP_handle_stderr, NULL);
