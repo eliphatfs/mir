@@ -318,17 +318,16 @@ int main(int argc, const char ** argv) {
   MIR_set_error_func(ctx, DAP_handle_error);
   /* pthread_create(threads + 2, NULL, DAP_handle_stderr, NULL);
   pthread_join(threads[2], NULL); */
-  FILE * fp = fopen(argv[argc - 1], "rb");
+  FILE * fp = fopen(argv[argc - 1], "r");
   if (fp == NULL) { DAP_handle_error(MIR_binary_io_error, "Cannot open file `%s`\n", argv[argc - 1]); }
   
   fseek(fp, 0, SEEK_END); 
   long size = ftell(fp);
   fseek(fp, 0, SEEK_SET);
   char * scr = malloc(size + 1);
-  fread(scr, 1, size, fp);
+  long n_ch = fread(scr, 1, size, fp);
   fclose(fp);
-  scr[size] = '\0';
-  for (int i = 0; i < size; i++) if (scr[i] == '\r') scr[i] = '\n';
+  scr[n_ch] = '\0';
   
   sleep(200);  /* Should use a semaphore here */
   pthread_mutex_lock(&MUT_LAUNCH);
