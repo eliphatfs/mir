@@ -34,6 +34,7 @@ static DAP_redirect_t redir[3];  /* STDIN, STDOUT, STDERR (STDERR not redirected
 #define MUT_I mutex[0]
 #define MUT_O mutex[1]
 #define MUT_CA_TRACE mutex[2]
+#define MUT_LAUNCH mutex[3]
 #define COND_CA cond[0]
 
 static DAP_redirect_t DAP_redirect(FILE * old, int dup2_id) {
@@ -91,11 +92,6 @@ int DAP_send_output_dispose(cJSON * json) {
   return 0;
 }
 
-void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc, size_t nops)
-{
-  
-}
-
 static cJSON * DAP_create_message(const char* msg_kind) {
   static unsigned long seq = 4;
   cJSON * obj = cJSON_CreateObject();
@@ -134,19 +130,43 @@ static int DAP_respond_dispose(cJSON * req, int success, cJSON * body_or_error)
   return 0;
 }
 
+volatile char dap_wait_on_next_insn_p = 0;
+char const* dap_wait_reason = "entry";
+void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc, size_t nops)
+{
+  if (dap_wait_on_next_insn_p)
+  {
+    dap_wait_on_next_insn_p = 0;
+    cJSON * body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "reason", dap_wait_reason);
+    DAP_send_output_dispose(DAP_create_event("stopped", body));
+    pthread_mutex_lock(&MUT_CA_TRACE);
+    pthread_cond_wait(&COND_CA, &MUT_CA_TRACE);
+    pthread_mutex_unlock(&MUT_CA_TRACE);
+  }
+}
+
 static int DAP_handle_request(cJSON * req) {
   const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItem(req, "command"));
+  char * ret = cJSON_Print(req);
+  fprintf(stderr, "%s\n", ret);
+  fflush(stderr);
+  cJSON_free(ret);
   if (strcmp(cmd, "next") == 0) {
     assert(0);  /* TODO: IMPLEMENT */
   }
   if (strcmp(cmd, "stepIn") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    pthread_cond_broadcast(&COND_CA);
+    dap_wait_reason = "step";
+    dap_wait_on_next_insn_p |= 1;
+    return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "stepOut") == 0) {
     assert(0);  /* TODO: IMPLEMENT */
   }
   if (strcmp(cmd, "continue") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    pthread_cond_broadcast(&COND_CA);
+    return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "evaluate") == 0) {
     assert(0);  /* TODO: IMPLEMENT */
@@ -161,22 +181,31 @@ static int DAP_handle_request(cJSON * req) {
     assert(0);  /* TODO: IMPLEMENT */
   }
   if (strcmp(cmd, "threads") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    /* TODO: IMPLEMENT */
   }
   if (strcmp(cmd, "pause") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    dap_wait_reason = "pause";
+    dap_wait_on_next_insn_p |= 1;
+    return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "setBreakpoints") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    /* TODO: set breakpoints */
+    cJSON * body = cJSON_CreateObject();
+    cJSON_AddArrayToObject(body, "breakpoints");
+    return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "source") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    /* TODO: Is this correct? */
+    cJSON * body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "content", "");
+    return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "initialize") == 0) {
     return DAP_respond_dispose(req, 1, cJSON_CreateObject())
         || DAP_send_output_dispose(DAP_create_event("initialized", NULL));
   }
   if (strcmp(cmd, "launch") == 0) {
+    pthread_mutex_unlock(&MUT_LAUNCH);
     return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "attach") == 0) {
@@ -192,12 +221,15 @@ static int DAP_handle_request(cJSON * req) {
 #undef END_RESP
 
 static void * DAP_handle_stdin(void * arg) {
+  pthread_mutex_lock(&MUT_LAUNCH);
   static char head_buf[42];
   while (1) {
     int hp = 0;
     while (hp < 16) {
-      if (read(redir[0].fd[2], head_buf + hp, 16 - hp) == 0)
+      int n = read(redir[0].fd[2], head_buf + hp, 16 - hp);
+      if (n == 0)
         return NULL;
+      hp += n;
     }
     head_buf[16] = '\0';
     assert(strcmp(head_buf, "Content-Length: ") == 0);
@@ -256,8 +288,23 @@ static void * DAP_handle_stderr(void * arg) {
 }
 */
 
+void MIR_NO_RETURN DAP_handle_error(enum MIR_error_type error_type, const char *format, ...) {
+  va_list ap;
+
+  va_start(ap, format);
+  vprintf(format, ap);
+  printf("\n");
+  va_end(ap);
+
+  sleep(1000);
+  DAP_send_output_dispose(DAP_create_event("terminated", NULL));
+  DAP_send_output_dispose(DAP_create_event("exited", cJSON_CreateRaw("{\"exitCode\": 1}")));
+  exit(1);
+}
+
 int main(int argc, const char ** argv) {
   pthread_t threads[2];
+  freopen("mir-intp-dap.log", "a", stderr);
   for (int i = 0; i < MUT_BOUND; i++)
   {
     pthread_mutex_init(mutex + i, NULL);
@@ -265,19 +312,48 @@ int main(int argc, const char ** argv) {
   }
   redir[0] = DAP_redirect(stdin, 0);
   redir[1] = DAP_redirect(stdout, 1);
-  freopen("error.log", "a", stderr);
   pthread_create(threads + 0, NULL, DAP_handle_stdin, NULL);
   pthread_create(threads + 1, NULL, DAP_handle_stdout, NULL);
+  MIR_context_t ctx = MIR_init();
+  MIR_set_error_func(ctx, DAP_handle_error);
   /* pthread_create(threads + 2, NULL, DAP_handle_stderr, NULL);
   pthread_join(threads[2], NULL); */
+  FILE * fp = fopen(argv[argc - 1], "rb");
+  if (fp == NULL) { DAP_handle_error(MIR_binary_io_error, "Cannot open file `%s`\n", argv[argc - 1]); }
+  
+  fseek(fp, 0, SEEK_END); 
+  long size = ftell(fp);
+  fseek(fp, 0, SEEK_SET);
+  char * scr = malloc(size + 1);
+  fread(scr, 1, size, fp);
+  fclose(fp);
+  scr[size] = '\0';
+  for (int i = 0; i < size; i++) if (scr[i] == '\r') scr[i] = '\n';
+  
+  sleep(200);  /* Should use a semaphore here */
+  pthread_mutex_lock(&MUT_LAUNCH);
+  pthread_mutex_unlock(&MUT_LAUNCH);
+  
+  MIR_scan_string(ctx, scr);
+
+  MIR_item_t main_func = NULL;
+  for (MIR_module_t module = DLIST_HEAD (MIR_module_t, *MIR_get_module_list (ctx)); module != NULL;
+        module = DLIST_NEXT (MIR_module_t, module)) {
+    for (MIR_item_t func = DLIST_HEAD (MIR_item_t, module->items); func != NULL;
+          func = DLIST_NEXT (MIR_item_t, func))
+      if (func->item_type == MIR_func_item && strcmp (func->u.func->name, "main") == 0)
+        main_func = func;
+    MIR_load_module (ctx, module);
+  }
+  if (main_func == NULL) { DAP_handle_error(MIR_no_func_error, "No main func found"); }
+  printf("Loaded sucessfully\n");
+  MIR_link(ctx, MIR_set_interp_interface, MIR_std_import_resolver);
+  printf("Linked sucessfully\n");
+  ((void (*)())(main_func->addr))();
+
+  MIR_finish(ctx);
+
   sleep(1000);
-  write(fileno(stdout), "write\n", 6);
-  fputs("fputs\n", stdout);
-  fprintf(stdout, "fprintf");
-  // write(redir[1].fd[1], "2222222222\n", redir[1].fd[1]);
-  pthread_join(threads[0], NULL);
-  sleep(1000);
-  pthread_cancel(threads[1]);
   DAP_send_output_dispose(DAP_create_event("terminated", NULL));
   DAP_send_output_dispose(DAP_create_event("exited", cJSON_CreateRaw("{\"exitCode\": 0}")));
   return 0;
