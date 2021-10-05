@@ -300,6 +300,7 @@ struct MIR_insn {
   MIR_op_t ops[1];
 #if MIR_DAP
   int src_lno;
+  char breakpoint_active_p;
 #endif
 };
 

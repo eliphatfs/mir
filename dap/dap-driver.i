@@ -146,20 +146,21 @@ volatile char dap_wait_mode_p = 0;
 #define DAP_WAIT_ST_OVER 1
 #define DAP_WAIT_ST_OUT 2
 volatile int wait_line = 1;
-char const* dap_wait_reason = "entry";
-char const* wait_filename = "";
-char const* wait_filepath = "";
+char const * volatile dap_wait_reason = "entry";
+char const * volatile wait_filename = "";
+char const * volatile wait_filepath = "";
 void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc, size_t nops)
 {
-  if (dap_wait_on_next_insn_p)
+  int src_lno = ((MIR_insn_t)pc[1].a)->src_lno;
+  char breakpoint_p = ((MIR_insn_t)pc[1].a)->breakpoint_active_p;
+  if ((src_lno && dap_wait_on_next_insn_p) || breakpoint_p)
   {
-    wait_line = ((MIR_insn_t)pc[1].a)->src_lno;
-    if (wait_line <= 0) return;
+    wait_line = src_lno;
     dap_wait_on_next_insn_p = 0;
     dap_wait_mode_p = 0;
     /* printf("%s\n", name); */
     cJSON * body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "reason", dap_wait_reason);
+    cJSON_AddStringToObject(body, "reason", breakpoint_p ? "breakpoint" : dap_wait_reason);
     cJSON_AddNumberToObject(body, "threadId", 0);
     DAP_send_output_dispose(DAP_create_event("stopped", body));
     pthread_mutex_lock(&MUT_CA_TRACE);
