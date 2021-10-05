@@ -847,6 +847,7 @@ static void finish_insn_trace (MIR_context_t ctx, MIR_full_insn_code_t code, cod
 }
 #endif
 
+#if !MIR_DAP
 static code_t call_insn_execute (MIR_context_t ctx, code_t pc, MIR_val_t *bp, code_t ops,
                                  int imm_p) {
   struct interp_ctx *interp_ctx = ctx->interp_ctx;
@@ -872,6 +873,7 @@ static code_t call_insn_execute (MIR_context_t ctx, code_t pc, MIR_val_t *bp, co
   pc += nops + 3; /* nops itself, the call insn, add ff interface address */
   return pc;
 }
+#endif
 
 static void OPTIMIZE eval (MIR_context_t ctx, func_desc_t func_desc, MIR_val_t *bp,
                            MIR_val_t *results) {

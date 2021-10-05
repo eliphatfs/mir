@@ -142,6 +142,9 @@ static void DAP_output_event(const char* cat, const char * msg)
 }
 
 volatile char dap_wait_on_next_insn_p = 1;
+volatile char dap_wait_mode_p = 0;
+#define DAP_WAIT_ST_OVER 1
+#define DAP_WAIT_ST_OUT 2
 volatile int wait_line = 1;
 char const* dap_wait_reason = "entry";
 char const* wait_filename = "";
@@ -153,6 +156,7 @@ void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_des
     wait_line = ((MIR_insn_t)pc[1].a)->src_lno;
     if (wait_line <= 0) return;
     dap_wait_on_next_insn_p = 0;
+    dap_wait_mode_p = 0;
     /* printf("%s\n", name); */
     cJSON * body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "reason", dap_wait_reason);
@@ -164,6 +168,40 @@ void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_des
   }
 }
 
+
+static code_t call_insn_execute (MIR_context_t ctx, code_t pc, MIR_val_t *bp, code_t ops,
+                                 int imm_p) {
+  static int sttr = 0;
+  struct interp_ctx *interp_ctx = ctx->interp_ctx;
+  int64_t nops = get_i (ops); /* #args w/o nop, insn, and ff interface address */
+  MIR_insn_t insn = get_a (ops + 1);
+  MIR_item_t proto_item = get_a (ops + 3);
+  void *func_addr = imm_p ? get_a (ops + 4) : *get_aop (bp, ops + 4);
+  size_t start = proto_item->u.proto->nres + 5;
+
+  if (VARR_EXPAND (MIR_val_t, arg_vals_varr, nops)) arg_vals = VARR_ADDR (MIR_val_t, arg_vals_varr);
+
+  for (size_t i = start; i < nops + 3; i++) arg_vals[i - start] = bp[get_i (ops + i)];
+
+  char mode = dap_wait_mode_p;
+  if ((mode & DAP_WAIT_ST_OVER) && dap_wait_on_next_insn_p)
+  {
+    dap_wait_on_next_insn_p = 0;
+    call (ctx, bp, &insn->ops[proto_item->u.proto->nres + 2] /* arg ops */,
+          ops + 2 /* ffi address holder */, proto_item, func_addr, ops + 5 /* results start */,
+          nops - start + 3 /* arg # */);
+    ++dap_wait_on_next_insn_p;
+  }
+  else
+    call (ctx, bp, &insn->ops[proto_item->u.proto->nres + 2] /* arg ops */,
+          ops + 2 /* ffi address holder */, proto_item, func_addr, ops + 5 /* results start */,
+          nops - start + 3 /* arg # */);
+  if (!(mode & DAP_WAIT_ST_OUT) && (dap_wait_mode_p & DAP_WAIT_ST_OUT))
+    ++dap_wait_on_next_insn_p;
+  pc += nops + 3; /* nops itself, the call insn, add ff interface address */
+  return pc;
+}
+
 static int DAP_handle_request(cJSON * req) {
   const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItem(req, "command"));
   char * ret = cJSON_Print(req);
@@ -171,16 +209,24 @@ static int DAP_handle_request(cJSON * req) {
   fflush(stderr);
   cJSON_free(ret);
   if (strcmp(cmd, "next") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    pthread_cond_broadcast(&COND_CA);
+    dap_wait_reason = "step";
+    dap_wait_on_next_insn_p |= 1;
+    dap_wait_mode_p = DAP_WAIT_ST_OVER;
+    return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "stepIn") == 0) {
     pthread_cond_broadcast(&COND_CA);
     dap_wait_reason = "step";
     dap_wait_on_next_insn_p |= 1;
+    dap_wait_mode_p = 0;
     return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "stepOut") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    pthread_cond_broadcast(&COND_CA);
+    dap_wait_reason = "step";
+    dap_wait_mode_p = DAP_WAIT_ST_OUT;
+    return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "continue") == 0) {
     pthread_cond_broadcast(&COND_CA);
@@ -337,6 +383,110 @@ void MIR_NO_RETURN DAP_handle_error(enum MIR_error_type error_type, const char *
   exit(1);
 }
 
+void MIR_link_no_inline (MIR_context_t ctx, void (*set_interface) (MIR_context_t ctx, MIR_item_t item),
+               void *import_resolver (const char *)) {
+  MIR_item_t item, tab_item, expr_item;
+  MIR_type_t type;
+  MIR_val_t res;
+  MIR_module_t m;
+  void *addr;
+  union {
+    int8_t i8;
+    int16_t i16;
+    int32_t i32;
+    int64_t i64;
+    float f;
+    double d;
+    long double ld;
+    void *a;
+  } v;
+
+  for (size_t i = 0; i < VARR_LENGTH (MIR_module_t, modules_to_link); i++) {
+    m = VARR_GET (MIR_module_t, modules_to_link, i);
+    for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
+         item = DLIST_NEXT (MIR_item_t, item))
+      if (item->item_type == MIR_func_item) {
+        assert (item->data == NULL);
+        if (simplify_func (ctx, item, TRUE)) item->data = (void *) 0; /* no inlining */
+      } else if (item->item_type == MIR_import_item) {
+        if ((tab_item = item_tab_find (ctx, item->u.import_id, &environment_module)) == NULL) {
+          if (import_resolver == NULL || (addr = import_resolver (item->u.import_id)) == NULL)
+            MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "import of undefined item %s",
+                                      item->u.import_id);
+          MIR_load_external (ctx, item->u.import_id, addr);
+          tab_item = item_tab_find (ctx, item->u.import_id, &environment_module);
+          mir_assert (tab_item != NULL);
+        }
+        item->addr = tab_item->addr;
+        item->ref_def = tab_item;
+      } else if (item->item_type == MIR_export_item) {
+        if ((tab_item = item_tab_find (ctx, item->u.export_id, m)) == NULL)
+          MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "export of undefined item %s",
+                                    item->u.export_id);
+        item->addr = tab_item->addr;
+        item->ref_def = tab_item;
+      } else if (item->item_type == MIR_forward_item) {
+        if ((tab_item = item_tab_find (ctx, item->u.forward_id, m)) == NULL)
+          MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "forward of undefined item %s",
+                                    item->u.forward_id);
+        item->addr = tab_item->addr;
+        item->ref_def = tab_item;
+      }
+  }
+  for (size_t i = 0; i < VARR_LENGTH (MIR_module_t, modules_to_link); i++) {
+    m = VARR_GET (MIR_module_t, modules_to_link, i);
+    for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
+         item = DLIST_NEXT (MIR_item_t, item)) {
+      if (item->item_type == MIR_func_item && item->data != NULL) {
+        process_inlines (ctx, item);
+        item->data = NULL;
+#if 0
+        fprintf (stderr, "+++++ Function after inlining:\n");
+        MIR_output_item (ctx, stderr, item);
+#endif
+      } else if (item->item_type == MIR_ref_data_item) {
+        assert (item->u.ref_data->ref_item->addr != NULL);
+        addr = (char *) item->u.ref_data->ref_item->addr + item->u.ref_data->disp;
+        memcpy (item->u.ref_data->load_addr, &addr, _MIR_type_size (ctx, MIR_T_P));
+        continue;
+      }
+      if (item->item_type != MIR_expr_data_item) continue;
+      expr_item = item->u.expr_data->expr_item;
+      MIR_interp (ctx, expr_item, &res, 0);
+      type = expr_item->u.func->res_types[0];
+      switch (type) {
+      case MIR_T_I8:
+      case MIR_T_U8: v.i8 = (int8_t) res.i; break;
+      case MIR_T_I16:
+      case MIR_T_U16: v.i16 = (int16_t) res.i; break;
+      case MIR_T_I32:
+      case MIR_T_U32: v.i32 = (int32_t) res.i; break;
+      case MIR_T_I64:
+      case MIR_T_U64: v.i64 = (int64_t) res.i; break;
+      case MIR_T_F: v.f = res.f; break;
+      case MIR_T_D: v.d = res.d; break;
+      case MIR_T_LD: v.ld = res.ld; break;
+      case MIR_T_P: v.a = res.a; break;
+      default: assert (FALSE); break;
+      }
+      memcpy (item->u.expr_data->load_addr, &v,
+              _MIR_type_size (ctx, expr_item->u.func->res_types[0]));
+    }
+  }
+  if (set_interface != NULL) {
+    while (VARR_LENGTH (MIR_module_t, modules_to_link) != 0) {
+      m = VARR_POP (MIR_module_t, modules_to_link);
+      for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
+           item = DLIST_NEXT (MIR_item_t, item))
+        if (item->item_type == MIR_func_item) {
+          finish_func_interpretation (item); /* in case if it was used for expr data */
+          set_interface (ctx, item);
+        }
+    }
+    set_interface (ctx, NULL); /* finish interface setting */
+  }
+}
+
 int main(int argc, const char ** argv) {
   pthread_t threads[2];
   freopen("mir-intp-dap.log", "a", stderr);
@@ -386,7 +536,7 @@ int main(int argc, const char ** argv) {
   }
   if (main_func == NULL) { DAP_handle_error(MIR_no_func_error, "No main func found"); }
   DAP_output_event("stdout", "Loaded sucessfully\n");
-  MIR_link(ctx, MIR_set_interp_interface, MIR_std_import_resolver);
+  MIR_link_no_inline(ctx, MIR_set_interp_interface, MIR_std_import_resolver);
   DAP_output_event("stdout", "Linked sucessfully\n");
   ((void (*)())(main_func->addr))();
 
