@@ -3639,6 +3639,8 @@ static size_t mem_page_size () { return sysconf (_SC_PAGE_SIZE); }
 #include <windows.h>
 #if MIR_DAP
 #include <pthread.h>
+#include <semaphore.h>
+/* On windows MinGW/CYGwin should be used */
 #endif
 
 #define PROT_WRITE_EXEC PAGE_EXECUTE_READWRITE

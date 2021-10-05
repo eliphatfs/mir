@@ -13,7 +13,6 @@
 
 #ifdef _WIN32
 #include <io.h>
-/* On windows MinGW/CYGwin should be used */
 #define _O_BINARY 0x8000
 #define pipe(X) _pipe(X, 4096, _O_BINARY)
 #define fileno _fileno
@@ -28,15 +27,18 @@
 typedef struct {
   int fd[3];  /* Read-end, Write-end, Original-fd */
 } DAP_redirect_t;
+static MIR_context_t dap_main_ctx;
 #define MUT_BOUND 10
 static pthread_mutex_t mutex[MUT_BOUND];
 static pthread_cond_t cond[MUT_BOUND];
+static sem_t sem[MUT_BOUND];
 static DAP_redirect_t redir[3];  /* STDIN, STDOUT, STDERR (STDERR not redirected now) */
 #define MUT_I mutex[0]
 #define MUT_O mutex[1]
 #define MUT_CA_TRACE mutex[2]
-#define MUT_LAUNCH mutex[3]
 #define COND_CA cond[0]
+#define SEM_LAUNCH sem[0]
+#define SEM_LAUNCHED sem[1]
 
 static DAP_redirect_t DAP_redirect(FILE * old, int dup2_id) {
   FILE* std_io = (FILE*)(old);
@@ -56,6 +58,110 @@ static DAP_redirect_t DAP_redirect(FILE * old, int dup2_id) {
   assert(res != -1);
   setvbuf(std_io, NULL, _IONBF, 0);
   return redr;
+}
+
+void MIR_link_no_inline (MIR_context_t ctx, void (*set_interface) (MIR_context_t ctx, MIR_item_t item),
+               void *import_resolver (const char *)) {
+  MIR_item_t item, tab_item, expr_item;
+  MIR_type_t type;
+  MIR_val_t res;
+  MIR_module_t m;
+  void *addr;
+  union {
+    int8_t i8;
+    int16_t i16;
+    int32_t i32;
+    int64_t i64;
+    float f;
+    double d;
+    long double ld;
+    void *a;
+  } v;
+
+  for (size_t i = 0; i < VARR_LENGTH (MIR_module_t, modules_to_link); i++) {
+    m = VARR_GET (MIR_module_t, modules_to_link, i);
+    for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
+         item = DLIST_NEXT (MIR_item_t, item))
+      if (item->item_type == MIR_func_item) {
+        assert (item->data == NULL);
+        if (simplify_func (ctx, item, TRUE)) item->data = (void *) 0; /* no inlining */
+      } else if (item->item_type == MIR_import_item) {
+        if ((tab_item = item_tab_find (ctx, item->u.import_id, &environment_module)) == NULL) {
+          if (import_resolver == NULL || (addr = import_resolver (item->u.import_id)) == NULL)
+            MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "import of undefined item %s",
+                                      item->u.import_id);
+          MIR_load_external (ctx, item->u.import_id, addr);
+          tab_item = item_tab_find (ctx, item->u.import_id, &environment_module);
+          mir_assert (tab_item != NULL);
+        }
+        item->addr = tab_item->addr;
+        item->ref_def = tab_item;
+      } else if (item->item_type == MIR_export_item) {
+        if ((tab_item = item_tab_find (ctx, item->u.export_id, m)) == NULL)
+          MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "export of undefined item %s",
+                                    item->u.export_id);
+        item->addr = tab_item->addr;
+        item->ref_def = tab_item;
+      } else if (item->item_type == MIR_forward_item) {
+        if ((tab_item = item_tab_find (ctx, item->u.forward_id, m)) == NULL)
+          MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "forward of undefined item %s",
+                                    item->u.forward_id);
+        item->addr = tab_item->addr;
+        item->ref_def = tab_item;
+      }
+  }
+  for (size_t i = 0; i < VARR_LENGTH (MIR_module_t, modules_to_link); i++) {
+    m = VARR_GET (MIR_module_t, modules_to_link, i);
+    for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
+         item = DLIST_NEXT (MIR_item_t, item)) {
+      if (item->item_type == MIR_func_item && item->data != NULL) {
+        process_inlines (ctx, item);
+        item->data = NULL;
+#if 0
+        fprintf (stderr, "+++++ Function after inlining:\n");
+        MIR_output_item (ctx, stderr, item);
+#endif
+      } else if (item->item_type == MIR_ref_data_item) {
+        assert (item->u.ref_data->ref_item->addr != NULL);
+        addr = (char *) item->u.ref_data->ref_item->addr + item->u.ref_data->disp;
+        memcpy (item->u.ref_data->load_addr, &addr, _MIR_type_size (ctx, MIR_T_P));
+        continue;
+      }
+      if (item->item_type != MIR_expr_data_item) continue;
+      expr_item = item->u.expr_data->expr_item;
+      MIR_interp (ctx, expr_item, &res, 0);
+      type = expr_item->u.func->res_types[0];
+      switch (type) {
+      case MIR_T_I8:
+      case MIR_T_U8: v.i8 = (int8_t) res.i; break;
+      case MIR_T_I16:
+      case MIR_T_U16: v.i16 = (int16_t) res.i; break;
+      case MIR_T_I32:
+      case MIR_T_U32: v.i32 = (int32_t) res.i; break;
+      case MIR_T_I64:
+      case MIR_T_U64: v.i64 = (int64_t) res.i; break;
+      case MIR_T_F: v.f = res.f; break;
+      case MIR_T_D: v.d = res.d; break;
+      case MIR_T_LD: v.ld = res.ld; break;
+      case MIR_T_P: v.a = res.a; break;
+      default: assert (FALSE); break;
+      }
+      memcpy (item->u.expr_data->load_addr, &v,
+              _MIR_type_size (ctx, expr_item->u.func->res_types[0]));
+    }
+  }
+  if (set_interface != NULL) {
+    while (VARR_LENGTH (MIR_module_t, modules_to_link) != 0) {
+      m = VARR_POP (MIR_module_t, modules_to_link);
+      for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
+           item = DLIST_NEXT (MIR_item_t, item))
+        if (item->item_type == MIR_func_item) {
+          finish_func_interpretation (item); /* in case if it was used for expr data */
+          set_interface (ctx, item);
+        }
+    }
+    set_interface (ctx, NULL); /* finish interface setting */
+  }
 }
 
 /*
@@ -141,6 +247,23 @@ static void DAP_output_event(const char* cat, const char * msg)
   DAP_send_output_dispose(DAP_create_event("output", body));
 }
 
+void MIR_NO_RETURN DAP_handle_error(enum MIR_error_type error_type, const char *format, ...) {
+  va_list ap;
+  static char buf[32767];
+
+  va_start(ap, format);
+  int x = vsnprintf(buf, 32764, format, ap);
+  buf[x] = '\n';
+  buf[x + 1] = '\0';
+  DAP_output_event("stderr", buf);
+  va_end(ap);
+
+  sleep(1000);
+  DAP_send_output_dispose(DAP_create_event("terminated", NULL));
+  DAP_send_output_dispose(DAP_create_event("exited", cJSON_CreateRaw("{\"exitCode\": 1}")));
+  exit(1);
+}
+
 volatile char dap_wait_on_next_insn_p = 1;
 volatile char dap_wait_mode_p = 0;
 #define DAP_WAIT_ST_OVER 1
@@ -158,7 +281,7 @@ void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_des
     wait_line = src_lno;
     dap_wait_on_next_insn_p = 0;
     dap_wait_mode_p = 0;
-    /* printf("%s\n", name); */
+    /* printf("%p %s %d %d\n", ((MIR_insn_t)pc[1].a), name, src_lno, (int)breakpoint_p); */
     cJSON * body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "reason", breakpoint_p ? "breakpoint" : dap_wait_reason);
     cJSON_AddNumberToObject(body, "threadId", 0);
@@ -269,9 +392,39 @@ static int DAP_handle_request(cJSON * req) {
     return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "setBreakpoints") == 0) {
-    /* TODO: set breakpoints */
     cJSON * body = cJSON_CreateObject();
-    cJSON_AddArrayToObject(body, "breakpoints");
+    cJSON * breaks = cJSON_AddArrayToObject(body, "breakpoints");
+    cJSON * lines = cJSON_GetObjectItem(cJSON_GetObjectItem(req, "arguments"), "lines");
+    int nlines = cJSON_GetArraySize(lines);
+    int * breaks_lno = alloca(sizeof(int) * nlines);
+    char * breaks_ver_p = alloca(sizeof(char) * nlines);
+    cJSON * bp_lno;
+    int i = 0;
+    cJSON_ArrayForEach(bp_lno, lines) {
+      breaks_ver_p[i] = 0;
+      breaks_lno[i++] = cJSON_GetNumberValue(bp_lno) + 0.5;
+    }
+    for (MIR_module_t module = DLIST_HEAD (MIR_module_t, *MIR_get_module_list (dap_main_ctx)); module != NULL;
+         module = DLIST_NEXT (MIR_module_t, module)) {
+      for (MIR_item_t func = DLIST_HEAD (MIR_item_t, module->items); func != NULL;
+           func = DLIST_NEXT (MIR_item_t, func))
+        if (func->item_type == MIR_func_item) {
+          for (MIR_insn_t insn = DLIST_HEAD (MIR_insn_t, func->u.func->insns); insn != NULL;
+               insn = DLIST_NEXT (MIR_insn_t, insn))
+            if (insn->src_lno > 0) {
+              insn->breakpoint_active_p = 0;
+              for (i = 0; i < nlines; i++) {
+                  insn->breakpoint_active_p |= breaks_lno[i] == insn->src_lno;
+                  breaks_ver_p[i] |= breaks_lno[i] == insn->src_lno;
+              }
+            }
+        }
+    }
+    for (i = 0; i < nlines; i++) {
+      cJSON * breakpoint = cJSON_CreateObject();
+      cJSON_AddBoolToObject(breakpoint, "verified", breaks_ver_p[i]);
+      cJSON_AddItemToArray(breaks, breakpoint);
+    }
     return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "source") == 0) {
@@ -285,7 +438,8 @@ static int DAP_handle_request(cJSON * req) {
         || DAP_send_output_dispose(DAP_create_event("initialized", NULL));
   }
   if (strcmp(cmd, "launch") == 0) {
-    pthread_mutex_unlock(&MUT_LAUNCH);
+    sem_post(&SEM_LAUNCH);
+    sem_wait(&SEM_LAUNCHED);
     return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "attach") == 0) {
@@ -302,7 +456,6 @@ static int DAP_handle_request(cJSON * req) {
 #undef END_RESP
 
 static void * DAP_handle_stdin(void * arg) {
-  pthread_mutex_lock(&MUT_LAUNCH);
   static char head_buf[42];
   while (1) {
     int hp = 0;
@@ -367,127 +520,6 @@ static void * DAP_handle_stderr(void * arg) {
 }
 */
 
-void MIR_NO_RETURN DAP_handle_error(enum MIR_error_type error_type, const char *format, ...) {
-  va_list ap;
-  static char buf[32767];
-
-  va_start(ap, format);
-  int x = vsnprintf(buf, 32764, format, ap);
-  buf[x] = '\n';
-  buf[x + 1] = '\0';
-  DAP_output_event("stderr", buf);
-  va_end(ap);
-
-  sleep(1000);
-  DAP_send_output_dispose(DAP_create_event("terminated", NULL));
-  DAP_send_output_dispose(DAP_create_event("exited", cJSON_CreateRaw("{\"exitCode\": 1}")));
-  exit(1);
-}
-
-void MIR_link_no_inline (MIR_context_t ctx, void (*set_interface) (MIR_context_t ctx, MIR_item_t item),
-               void *import_resolver (const char *)) {
-  MIR_item_t item, tab_item, expr_item;
-  MIR_type_t type;
-  MIR_val_t res;
-  MIR_module_t m;
-  void *addr;
-  union {
-    int8_t i8;
-    int16_t i16;
-    int32_t i32;
-    int64_t i64;
-    float f;
-    double d;
-    long double ld;
-    void *a;
-  } v;
-
-  for (size_t i = 0; i < VARR_LENGTH (MIR_module_t, modules_to_link); i++) {
-    m = VARR_GET (MIR_module_t, modules_to_link, i);
-    for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
-         item = DLIST_NEXT (MIR_item_t, item))
-      if (item->item_type == MIR_func_item) {
-        assert (item->data == NULL);
-        if (simplify_func (ctx, item, TRUE)) item->data = (void *) 0; /* no inlining */
-      } else if (item->item_type == MIR_import_item) {
-        if ((tab_item = item_tab_find (ctx, item->u.import_id, &environment_module)) == NULL) {
-          if (import_resolver == NULL || (addr = import_resolver (item->u.import_id)) == NULL)
-            MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "import of undefined item %s",
-                                      item->u.import_id);
-          MIR_load_external (ctx, item->u.import_id, addr);
-          tab_item = item_tab_find (ctx, item->u.import_id, &environment_module);
-          mir_assert (tab_item != NULL);
-        }
-        item->addr = tab_item->addr;
-        item->ref_def = tab_item;
-      } else if (item->item_type == MIR_export_item) {
-        if ((tab_item = item_tab_find (ctx, item->u.export_id, m)) == NULL)
-          MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "export of undefined item %s",
-                                    item->u.export_id);
-        item->addr = tab_item->addr;
-        item->ref_def = tab_item;
-      } else if (item->item_type == MIR_forward_item) {
-        if ((tab_item = item_tab_find (ctx, item->u.forward_id, m)) == NULL)
-          MIR_get_error_func (ctx) (MIR_undeclared_op_ref_error, "forward of undefined item %s",
-                                    item->u.forward_id);
-        item->addr = tab_item->addr;
-        item->ref_def = tab_item;
-      }
-  }
-  for (size_t i = 0; i < VARR_LENGTH (MIR_module_t, modules_to_link); i++) {
-    m = VARR_GET (MIR_module_t, modules_to_link, i);
-    for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
-         item = DLIST_NEXT (MIR_item_t, item)) {
-      if (item->item_type == MIR_func_item && item->data != NULL) {
-        process_inlines (ctx, item);
-        item->data = NULL;
-#if 0
-        fprintf (stderr, "+++++ Function after inlining:\n");
-        MIR_output_item (ctx, stderr, item);
-#endif
-      } else if (item->item_type == MIR_ref_data_item) {
-        assert (item->u.ref_data->ref_item->addr != NULL);
-        addr = (char *) item->u.ref_data->ref_item->addr + item->u.ref_data->disp;
-        memcpy (item->u.ref_data->load_addr, &addr, _MIR_type_size (ctx, MIR_T_P));
-        continue;
-      }
-      if (item->item_type != MIR_expr_data_item) continue;
-      expr_item = item->u.expr_data->expr_item;
-      MIR_interp (ctx, expr_item, &res, 0);
-      type = expr_item->u.func->res_types[0];
-      switch (type) {
-      case MIR_T_I8:
-      case MIR_T_U8: v.i8 = (int8_t) res.i; break;
-      case MIR_T_I16:
-      case MIR_T_U16: v.i16 = (int16_t) res.i; break;
-      case MIR_T_I32:
-      case MIR_T_U32: v.i32 = (int32_t) res.i; break;
-      case MIR_T_I64:
-      case MIR_T_U64: v.i64 = (int64_t) res.i; break;
-      case MIR_T_F: v.f = res.f; break;
-      case MIR_T_D: v.d = res.d; break;
-      case MIR_T_LD: v.ld = res.ld; break;
-      case MIR_T_P: v.a = res.a; break;
-      default: assert (FALSE); break;
-      }
-      memcpy (item->u.expr_data->load_addr, &v,
-              _MIR_type_size (ctx, expr_item->u.func->res_types[0]));
-    }
-  }
-  if (set_interface != NULL) {
-    while (VARR_LENGTH (MIR_module_t, modules_to_link) != 0) {
-      m = VARR_POP (MIR_module_t, modules_to_link);
-      for (item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
-           item = DLIST_NEXT (MIR_item_t, item))
-        if (item->item_type == MIR_func_item) {
-          finish_func_interpretation (item); /* in case if it was used for expr data */
-          set_interface (ctx, item);
-        }
-    }
-    set_interface (ctx, NULL); /* finish interface setting */
-  }
-}
-
 int main(int argc, const char ** argv) {
   pthread_t threads[2];
   freopen("mir-intp-dap.log", "a", stderr);
@@ -495,12 +527,13 @@ int main(int argc, const char ** argv) {
   {
     pthread_mutex_init(mutex + i, NULL);
     pthread_cond_init(cond + i, NULL);
+    sem_init(sem + i, 0, 0);
   }
   redir[0] = DAP_redirect(stdin, 0);
   redir[1] = DAP_redirect(stdout, 1);
   pthread_create(threads + 0, NULL, DAP_handle_stdin, NULL);
   pthread_create(threads + 1, NULL, DAP_handle_stdout, NULL);
-  MIR_context_t ctx = MIR_init();
+  MIR_context_t ctx = dap_main_ctx = MIR_init();
   MIR_set_error_func(ctx, DAP_handle_error);
   /* pthread_create(threads + 2, NULL, DAP_handle_stderr, NULL);
   pthread_join(threads[2], NULL); */
@@ -520,11 +553,9 @@ int main(int argc, const char ** argv) {
   fclose(fp);
   scr[n_ch] = '\0';
   
-  sleep(200);  /* Should use a semaphore here */
-  pthread_mutex_lock(&MUT_LAUNCH);
-  pthread_mutex_unlock(&MUT_LAUNCH);
-  
   MIR_scan_string(ctx, scr);
+  
+  sem_wait(&SEM_LAUNCH);
 
   MIR_item_t main_func = NULL;
   for (MIR_module_t module = DLIST_HEAD (MIR_module_t, *MIR_get_module_list (ctx)); module != NULL;
@@ -539,6 +570,9 @@ int main(int argc, const char ** argv) {
   DAP_output_event("stdout", "Loaded sucessfully\n");
   MIR_link_no_inline(ctx, MIR_set_interp_interface, MIR_std_import_resolver);
   DAP_output_event("stdout", "Linked sucessfully\n");
+
+  sem_post(&SEM_LAUNCHED);
+
   ((void (*)())(main_func->addr))();
 
   MIR_finish(ctx);
