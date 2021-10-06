@@ -27,6 +27,15 @@
 typedef struct {
   int fd[3];  /* Read-end, Write-end, Original-fd */
 } DAP_redirect_t;
+
+typedef struct {
+  MIR_func_t func;
+  MIR_val_t * bp;
+  int cur_lno;
+} DAP_stack_frame_t;
+
+DEF_VARR(DAP_stack_frame_t);
+
 static MIR_context_t dap_main_ctx;
 #define MUT_BOUND 10
 static pthread_mutex_t mutex[MUT_BOUND];
@@ -268,17 +277,18 @@ volatile char dap_wait_on_next_insn_p = 1;
 volatile char dap_wait_mode_p = 0;
 #define DAP_WAIT_ST_OVER 1
 #define DAP_WAIT_ST_OUT 2
-volatile int wait_line = 1;
+/* volatile int wait_line = 1; */
 char const * volatile dap_wait_reason = "entry";
 char const * volatile wait_filename = "";
 char const * volatile wait_filepath = "";
-void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc, size_t nops)
+static VARR (DAP_stack_frame_t) * dap_stack_trace;
+static void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_desc, code_t pc, size_t nops)
 {
   int src_lno = ((MIR_insn_t)pc[1].a)->src_lno;
   char breakpoint_p = ((MIR_insn_t)pc[1].a)->breakpoint_active_p;
+  if (src_lno) dap_stack_trace->varr[dap_stack_trace->els_num - 1].cur_lno = src_lno;
   if ((src_lno && dap_wait_on_next_insn_p) || breakpoint_p)
   {
-    wait_line = src_lno;
     dap_wait_on_next_insn_p = 0;
     dap_wait_mode_p = 0;
     /* printf("%p %s %d %d\n", ((MIR_insn_t)pc[1].a), name, src_lno, (int)breakpoint_p); */
@@ -292,6 +302,15 @@ void start_insn_trace (MIR_context_t ctx, const char *name, func_desc_t func_des
   }
 }
 
+static inline void start_eval_trace(MIR_item_t func_item, MIR_val_t * bp) {
+  VARR_PUSH(DAP_stack_frame_t, dap_stack_trace, ((DAP_stack_frame_t) {
+    func_item->u.func, bp
+  }));
+}
+
+static inline void end_eval_trace(MIR_item_t func_item, MIR_val_t * bp) {
+  VARR_POP(DAP_stack_frame_t, dap_stack_trace);
+}
 
 static code_t call_insn_execute (MIR_context_t ctx, code_t pc, MIR_val_t *bp, code_t ops,
                                  int imm_p) {
@@ -371,16 +390,20 @@ static int DAP_handle_request(cJSON * req) {
   if (strcmp(cmd, "stackTrace") == 0) {
     cJSON * body = cJSON_CreateObject();
     cJSON * stackFrames = cJSON_AddArrayToObject(body, "stackFrames");
-    cJSON_AddNumberToObject(body, "totalFrames", 1);
-    cJSON * frame = cJSON_CreateObject();
-    cJSON_AddItemToArray(stackFrames, frame);
-    cJSON_AddNumberToObject(frame, "line", wait_line);
-    cJSON_AddNumberToObject(frame, "column", 0);
-    cJSON_AddNumberToObject(frame, "id", 1000);
-    cJSON_AddStringToObject(frame, "name", "<top>");
-    cJSON * src = cJSON_AddObjectToObject(frame, "source");
-    cJSON_AddStringToObject(src, "name", wait_filename);
-    cJSON_AddStringToObject(src, "path", wait_filepath);
+    size_t nFrames = VARR_LENGTH(DAP_stack_frame_t, dap_stack_trace);
+    cJSON_AddNumberToObject(body, "totalFrames", nFrames);
+    for (size_t i = 0; i < nFrames; i++) {
+      cJSON * frame = cJSON_CreateObject();
+      DAP_stack_frame_t dap_frame = VARR_GET(DAP_stack_frame_t, dap_stack_trace, i);
+      cJSON_InsertItemInArray(stackFrames, 0, frame);
+      cJSON_AddNumberToObject(frame, "line", dap_frame.cur_lno);
+      cJSON_AddNumberToObject(frame, "column", 0);
+      cJSON_AddNumberToObject(frame, "id", 1000 + i);
+      cJSON_AddStringToObject(frame, "name", dap_frame.func->name);
+      cJSON * src = cJSON_AddObjectToObject(frame, "source");
+      cJSON_AddStringToObject(src, "name", wait_filename);
+      cJSON_AddStringToObject(src, "path", wait_filepath);
+    }
     return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "threads") == 0) {
@@ -535,6 +558,7 @@ int main(int argc, const char ** argv) {
   pthread_create(threads + 1, NULL, DAP_handle_stdout, NULL);
   MIR_context_t ctx = dap_main_ctx = MIR_init();
   MIR_set_error_func(ctx, DAP_handle_error);
+  VARR_CREATE(DAP_stack_frame_t, dap_stack_trace, 0);
   /* pthread_create(threads + 2, NULL, DAP_handle_stderr, NULL);
   pthread_join(threads[2], NULL); */
   FILE * fp = fopen(argv[argc - 1], "r");
@@ -575,6 +599,7 @@ int main(int argc, const char ** argv) {
 
   ((void (*)())(main_func->addr))();
 
+  VARR_DESTROY(DAP_stack_frame_t, dap_stack_trace);
   MIR_finish(ctx);
   DAP_send_output_dispose(DAP_create_event("terminated", NULL));
 

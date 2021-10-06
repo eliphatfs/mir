@@ -1636,7 +1636,13 @@ static void interp_arr_varg (MIR_context_t ctx, MIR_item_t func_item, MIR_val_t 
   if (func_desc->nregs < nargs + 1) nargs = func_desc->nregs - 1;
   bp[0].i = 0;
   memcpy (&bp[1], vals, sizeof (MIR_val_t) * nargs);
+#if MIR_DAP
+  start_eval_trace(func_item, bp);
+#endif
   eval (ctx, func_desc, bp, results);
+#if MIR_DAP
+  end_eval_trace(func_item, bp);
+#endif
   if (va != NULL)
 #if VA_LIST_IS_ARRAY_P
     va_end (va);
