@@ -345,10 +345,16 @@ static code_t call_insn_execute (MIR_context_t ctx, code_t pc, MIR_val_t *bp, co
   return pc;
 }
 
-static char const * DAP_pretty_print(MIR_val_t * bp, reg_desc_t reg) {
+typedef enum {
+  DAP_STR = MIR_T_BOUND + 3,
+  DAP_DATABLOCK
+} DAP_extended_type_t;
+
+static char const * DAP_pretty_print(MIR_val_t val, long reg_type) {
   static char buffer[512];
-  MIR_val_t val = bp[reg.reg];
-  switch (reg.type)
+  cJSON* str_obj;
+  char* str_print;
+  switch (reg_type)
   {
   case MIR_T_I8:
   case MIR_T_I16:
@@ -366,7 +372,7 @@ static char const * DAP_pretty_print(MIR_val_t * bp, reg_desc_t reg) {
     snprintf(buffer, 511, "* %" PRIu64 " (0x%" PRIx64 ")", (uint64_t)val.a, (uint64_t)val.a);
     break;
   case MIR_T_F:
-    snprintf(buffer, 511, "%lf", (double)val.f);
+    snprintf(buffer, 511, "%lff", (double)val.f);
     break;
   case MIR_T_D:
     snprintf(buffer, 511, "%lf", (double)val.d);
@@ -374,11 +380,255 @@ static char const * DAP_pretty_print(MIR_val_t * bp, reg_desc_t reg) {
   case MIR_T_LD:
     snprintf(buffer, 511, "%lf", (double)val.ld);
     break;
+  case DAP_STR:
+    str_obj = cJSON_CreateStringReference(val.a);
+    cJSON_PrintPreallocated (str_obj, buffer, 506, 0);
+    cJSON_Delete(str_obj);
+    break;
+  case DAP_DATABLOCK:
+    /* TODO: Refactor and implement */
   default:
-    snprintf(buffer, 511, "T(%d) %p", reg.type, val.a);
+    snprintf(buffer, 511, "(T: %d) %p", reg_type, val.a);
     break;
   }
   return buffer;
+}
+
+static void DAP_eval_internal(char const * input_str, VARR (char) * out_buf, int dollar);
+
+static MIR_val_t * DAP_eval_find_reg(char const * name) {
+  int nFrames = VARR_LENGTH(DAP_stack_frame_t, dap_stack_trace);
+  for (int i = nFrames - 1; i >= 0; i--) {
+    DAP_stack_frame_t dap_frame = VARR_GET(DAP_stack_frame_t, dap_stack_trace, i);
+    reg_desc_t * reg_desc = find_rd_by_name(dap_main_ctx, name, dap_frame.func);
+    if (reg_desc) return dap_frame.bp + reg_desc->reg;
+  }
+  return NULL;
+}
+
+static MIR_type_t DAP_eval_type(char const * name) {
+  MIR_val_t val;
+  int pos = 0;
+  int slen = strlen(name);
+  if (strcmp(name, "$") == 0) return MIR_T_I16;
+  if (sscanf(name, "0x%" SCNx64, &val.i) == 1) return MIR_T_I64;
+  if (sscanf(name, "%" SCNi64 "%n", &val.i, &pos) == 1 && pos == slen) return MIR_T_I64;
+  if (sscanf(name, "%lff%n", &val.d, &pos) == 1 && pos == slen) { return MIR_T_F; }
+  if (sscanf(name, "%lf", &val.d) == 1) return MIR_T_D;
+  int nFrames = VARR_LENGTH(DAP_stack_frame_t, dap_stack_trace);
+  for (int i = nFrames - 1; i >= 0; i--) {
+    DAP_stack_frame_t dap_frame = VARR_GET(DAP_stack_frame_t, dap_stack_trace, i);
+    reg_desc_t * reg_desc = find_rd_by_name(dap_main_ctx, name, dap_frame.func);
+    if (reg_desc) return reg_desc->type;
+    MIR_item_t item;
+    for (item = DLIST_HEAD (MIR_item_t, dap_frame.func->func_item->module->items); item != NULL;
+         item = DLIST_NEXT (MIR_item_t, item)) {
+      if (item->item_type == MIR_import_item || item->item_type == MIR_export_item) {
+        if (item->u.export_id && strcmp(item->u.export_id, name) == 0)
+          break;
+      }
+      if (item->item_type == MIR_data_item) {
+        if (item->u.data->name && strcmp(item->u.data->name, name) == 0)
+          break;
+      }
+    }
+    if (item) {
+      if (item->item_type == MIR_import_item || item->item_type == MIR_export_item)
+        return MIR_T_P;
+      if (item->item_type == MIR_data_item)
+        return (item->u.data->el_type == MIR_T_U8 && item->u.data->u.els[item->u.data->nel - 1] == '\0') ? DAP_STR
+        : DAP_DATABLOCK;
+    }
+  }
+  return MIR_T_UNDEF;
+}
+
+static MIR_val_t DAP_eval_name(char const * name, int dollar) {
+  MIR_val_t val;
+  val.i = 0;
+  int pos = 0;
+  int slen = strlen(name);
+  if (*name == '*')
+    return *(MIR_val_t *)(DAP_eval_name(name + 1, dollar).a);
+  if (strcmp(name, "$") == 0) {
+    val.i = dollar;
+    return val;
+  }
+  if (sscanf(name, "0x%" SCNx64, &val.i) == 1) return val;
+  if (sscanf(name, "%" SCNi64 "%n", &val.i, &pos) == 1 && pos == slen) return val;
+  if (sscanf(name, "%lff%n", &val.d, &pos) == 1 && pos == slen) { val.f = (float)val.d; return val; }
+  if (sscanf(name, "%lf", &val.d) == 1) return val;
+  MIR_val_t * pval = DAP_eval_find_reg(name);
+  if (pval != NULL) return *pval;
+  int nFrames = VARR_LENGTH(DAP_stack_frame_t, dap_stack_trace);
+  for (int i = nFrames - 1; i >= 0; i--) {
+    DAP_stack_frame_t dap_frame = VARR_GET(DAP_stack_frame_t, dap_stack_trace, i);
+    MIR_item_t item;
+    /* FIXME: Refactor me */
+    for (item = DLIST_HEAD (MIR_item_t, dap_frame.func->func_item->module->items); item != NULL;
+         item = DLIST_NEXT (MIR_item_t, item)) {
+      if (item->item_type == MIR_import_item || item->item_type == MIR_export_item) {
+        if (item->u.export_id && strcmp(item->u.export_id, name) == 0)
+          break;
+      }
+      if (item->item_type == MIR_data_item) {
+        if (item->u.data->name && strcmp(item->u.data->name, name) == 0)
+          break;
+      }
+    }
+    while (item) {
+      if (item->item_type == MIR_export_item) {
+        item = item->ref_def;
+        continue;
+      }
+      else if (item->item_type == MIR_import_item || item->item_type == MIR_func_item) {
+        val.a = item->addr;
+        return val;
+      }
+      else if (item->item_type == MIR_data_item) {
+        val.a = item->u.data->u.els;
+        return val;
+      }
+      else break;
+    }
+  }
+  return val;
+}
+
+static void DAP_eval_dispatch_p(char const * input_str, VARR (char) * out_str, int dollar) {
+  char type_s[9];
+  char var_s[256];
+  int pos;
+  MIR_val_t val;
+  val.i = 0;
+  if (sscanf(input_str, "%8s%n", type_s, &pos) != 1) {
+    VARR_PUSH_ARR(char, out_str, "Missing type for p\n", strlen("Missing type for p\n"));
+    input_str += pos;
+    return;
+  }
+  if (sscanf(input_str, "%255s%n", var_s, &pos) == 1) {
+    val = DAP_eval_name(var_s, dollar);
+    input_str += pos;
+  }
+  while (sscanf(input_str, "%255s%n", var_s, &pos) == 1) {
+    val.i += DAP_eval_name(var_s, dollar).i;
+    input_str += pos;
+  }
+  char const * rs = "<?>";
+  if (strcmp(type_s, "i8") == 0) {
+    val.i = (int8_t)val.i;
+    rs = DAP_pretty_print(val, MIR_T_I8);
+  }
+  else if (strcmp(type_s, "u8") == 0) {
+    val.i = (uint8_t)val.i;
+    rs = DAP_pretty_print(val, MIR_T_U8);
+  }
+  else if (strcmp(type_s, "i16") == 0) {
+    val.i = (int16_t)val.i;
+    rs = DAP_pretty_print(val, MIR_T_I16);
+  }
+  else if (strcmp(type_s, "u16") == 0) {
+    val.i = (uint16_t)val.i;
+    rs = DAP_pretty_print(val, MIR_T_U16);
+  }
+  else if (strcmp(type_s, "i32") == 0) {
+    val.i = (int32_t)val.i;
+    rs = DAP_pretty_print(val, MIR_T_I32);
+  }
+  else if (strcmp(type_s, "u32") == 0) {
+    val.i = (uint32_t)val.i;
+    rs = DAP_pretty_print(val, MIR_T_U32);
+  }
+  else if (strcmp(type_s, "i64") == 0) {
+    val.i = (int64_t)val.i;
+    rs = DAP_pretty_print(val, MIR_T_I64);
+  }
+  else if (strcmp(type_s, "u64") == 0) {
+    val.i = (uint64_t)val.i;
+    rs = DAP_pretty_print(val, MIR_T_U64);
+  }
+  else if (strcmp(type_s, "f") == 0) {
+    rs = DAP_pretty_print(val, MIR_T_F);
+  }
+  else if (strcmp(type_s, "d") == 0) {
+    rs = DAP_pretty_print(val, MIR_T_D);
+  }
+  else if (strcmp(type_s, "ld") == 0) {
+    rs = DAP_pretty_print(val, MIR_T_LD);
+  }
+  else if (strcmp(type_s, "str") == 0) {
+    rs = DAP_pretty_print(val, DAP_STR);
+  }
+  VARR_PUSH_ARR(char, out_str, rs, strlen(rs));
+  VARR_PUSH(char, out_str, '\n');
+}
+
+static void DAP_eval_dispatch_s(char const * input_str, VARR (char) * out_str, int dollar) {
+  char target_s[128]; char mov_s[128];
+  if (sscanf(input_str, "%127s%127s", target_s, mov_s) != 2)
+    VARR_PUSH_ARR(char, out_str, "Wrong nargs for s\n", strlen("Wrong nargs for s\n"));
+  else {
+    MIR_val_t * target = DAP_eval_find_reg(target_s);
+    if (target == NULL)
+      VARR_PUSH_ARR(char, out_str, "Invalid target for s\n", strlen("Invalid target for s\n"));
+    else
+      *target = DAP_eval_name(mov_s, dollar);
+  }
+}
+
+static void DAP_eval_dispatch_r(char const * input_str, VARR (char) * out_str, int dollar) {
+  int s, e, st, pos;
+  if (sscanf(input_str, "%d%d%d%n", &s, &e, &st, &pos) != 3) {
+    VARR_PUSH_ARR(char, out_str, "Wrong nargs for r\n", strlen("Wrong nargs for r\n"));
+  }
+  else for (int i = s; i < e; i += st)
+    DAP_eval_internal(input_str + pos, out_str, i);
+}
+
+static void DAP_eval_internal(char const * input_str, VARR (char) * out_buf, int dollar) {
+  while (isspace(*input_str)) ++input_str;
+  switch (*input_str) {
+    case 'p':
+      if (isspace(input_str[1])) {
+        DAP_eval_dispatch_p(input_str + 2, out_buf, dollar);
+        return;
+      }
+      break;
+    case 's':
+      if (isspace(input_str[1])) {
+        DAP_eval_dispatch_s(input_str + 2, out_buf, dollar);
+        return;
+      }
+      break;
+    case 'r':
+      if (isspace(input_str[1])) {
+        DAP_eval_dispatch_r(input_str + 2, out_buf, dollar);
+        return;
+      }
+      break;
+    case '\0':
+      return;
+  }
+  MIR_type_t ty = DAP_eval_type(input_str);
+  if (ty == MIR_T_UNDEF)
+    VARR_PUSH_ARR(char, out_buf, "<?>\n", strlen("<?>\n"));
+  else {
+    MIR_val_t reg = DAP_eval_name(input_str, dollar);
+    const char * rs = DAP_pretty_print(reg, ty);
+    VARR_PUSH_ARR(char, out_buf, rs, strlen(rs));
+    VARR_PUSH(char, out_buf, '\n');
+  }
+}
+
+char const * DAP_eval(char const * input_str) {
+  static VARR (char) * out_buf = NULL;
+  if (out_buf == NULL) VARR_CREATE(char, out_buf, 0);
+  VARR_TRUNC(char, out_buf, 0);
+  DAP_eval_internal(input_str, out_buf, 0);
+  if (VARR_LENGTH(char, out_buf) > 0 && VARR_LAST(char, out_buf) == '\n')
+    VARR_POP(char, out_buf);
+  VARR_PUSH(char, out_buf, '\0');
+  return VARR_ADDR(char, out_buf);
 }
 
 static int DAP_handle_request(cJSON * req) {
@@ -412,7 +662,11 @@ static int DAP_handle_request(cJSON * req) {
     return DAP_respond_dispose(req, 1, cJSON_CreateObject());
   }
   if (strcmp(cmd, "evaluate") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    cJSON * body = cJSON_CreateObject();
+    const char * result = DAP_eval(cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(req, "arguments"), "expression")));
+    cJSON_AddNumberToObject(body, "variablesReference", 0);
+    cJSON_AddStringToObject(body, "result", result);
+    return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "variables") == 0) {
     cJSON * body = cJSON_CreateObject();
@@ -430,7 +684,7 @@ static int DAP_handle_request(cJSON * req) {
         cJSON_Delete(var);
         continue;
       }
-      cJSON_AddStringToObject(var, "value", DAP_pretty_print(frame.bp, reg));
+      cJSON_AddStringToObject(var, "value", DAP_pretty_print(frame.bp[reg.reg], reg.type));
       cJSON_AddNumberToObject(var, "variablesReference", 0);
       cJSON_AddItemToArray(variables, var);
     }
@@ -518,7 +772,9 @@ static int DAP_handle_request(cJSON * req) {
     return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "initialize") == 0) {
-    return DAP_respond_dispose(req, 1, cJSON_CreateObject())
+    cJSON * caps = cJSON_CreateObject();
+    cJSON_AddTrueToObject(caps, "supportsEvaluateForHovers");
+    return DAP_respond_dispose(req, 1, caps)
         || DAP_send_output_dispose(DAP_create_event("initialized", NULL));
   }
   if (strcmp(cmd, "launch") == 0) {
