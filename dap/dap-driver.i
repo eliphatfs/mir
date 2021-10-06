@@ -345,6 +345,42 @@ static code_t call_insn_execute (MIR_context_t ctx, code_t pc, MIR_val_t *bp, co
   return pc;
 }
 
+static char const * DAP_pretty_print(MIR_val_t * bp, reg_desc_t reg) {
+  static char buffer[512];
+  MIR_val_t val = bp[reg.reg];
+  switch (reg.type)
+  {
+  case MIR_T_I8:
+  case MIR_T_I16:
+  case MIR_T_I32:
+  case MIR_T_I64:
+    snprintf(buffer, 511, "%" PRId64 " (0x%" PRIx64 ")", val.i, val.u);
+    break;
+  case MIR_T_U8:
+  case MIR_T_U16:
+  case MIR_T_U32:
+  case MIR_T_U64:
+    snprintf(buffer, 511, "%" PRIu64 " (0x%" PRIx64 ")", val.u, val.u);
+    break;
+  case MIR_T_P:
+    snprintf(buffer, 511, "* %" PRIu64 " (0x%" PRIx64 ")", (uint64_t)val.a, (uint64_t)val.a);
+    break;
+  case MIR_T_F:
+    snprintf(buffer, 511, "%lf", (double)val.f);
+    break;
+  case MIR_T_D:
+    snprintf(buffer, 511, "%lf", (double)val.d);
+    break;
+  case MIR_T_LD:
+    snprintf(buffer, 511, "%lf", (double)val.ld);
+    break;
+  default:
+    snprintf(buffer, 511, "T(%d) %p", reg.type, val.a);
+    break;
+  }
+  return buffer;
+}
+
 static int DAP_handle_request(cJSON * req) {
   const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItem(req, "command"));
   char * ret = cJSON_Print(req);
@@ -379,12 +415,37 @@ static int DAP_handle_request(cJSON * req) {
     assert(0);  /* TODO: IMPLEMENT */
   }
   if (strcmp(cmd, "variables") == 0) {
-    assert(0);  /* TODO: IMPLEMENT */
+    cJSON * body = cJSON_CreateObject();
+    cJSON * variables = cJSON_AddArrayToObject(body, "variables");
+    cJSON * vid = cJSON_GetObjectItem(cJSON_GetObjectItem(req, "arguments"), "variablesReference");
+    DAP_stack_frame_t frame = VARR_GET(
+      DAP_stack_frame_t, dap_stack_trace, (int)(cJSON_GetNumberValue(vid) - 1000 + 0.5)
+    );
+    func_regs_t func_regs = frame.func->internal;
+    size_t nlocals = VARR_LENGTH(reg_desc_t, func_regs->reg_descs);
+    for (size_t i = 1; i < nlocals; i++) {
+      reg_desc_t reg = VARR_GET(reg_desc_t, func_regs->reg_descs, i);
+      cJSON * var = cJSON_CreateObject();
+      if (!cJSON_AddStringToObject(var, "name", reg.name)) {
+        cJSON_Delete(var);
+        continue;
+      }
+      cJSON_AddStringToObject(var, "value", DAP_pretty_print(frame.bp, reg));
+      cJSON_AddNumberToObject(var, "variablesReference", 0);
+      cJSON_AddItemToArray(variables, var);
+    }
+    return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "scopes") == 0) {
     cJSON * body = cJSON_CreateObject();
     cJSON * scopes = cJSON_AddArrayToObject(body, "scopes");
-    /* TODO: IMPLEMENT */
+    cJSON * scope = cJSON_CreateObject();
+    cJSON_AddItemToArray(scopes, scope);
+    cJSON * sid = cJSON_GetObjectItem(cJSON_GetObjectItem(req, "arguments"), "frameId");
+    cJSON_AddItemReferenceToObject(scope, "variablesReference", sid);
+    cJSON_AddStringToObject(scope, "name", "Locals");
+    cJSON_AddStringToObject(scope, "presentationHint", "locals");
+    cJSON_AddFalseToObject(scope, "expensive");
     return DAP_respond_dispose(req, 1, body);
   }
   if (strcmp(cmd, "stackTrace") == 0) {
