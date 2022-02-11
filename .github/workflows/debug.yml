@@ -24,6 +24,9 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           distro: ${{ matrix.distro }}
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y make gcc
           run: |
             uname -a
             echo ::set-output name=uname::$(uname -a)
