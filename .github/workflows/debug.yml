@@ -1,6 +1,6 @@
 name: mir-debug
 
-on: [workflow_dispatch]
+on: [push]
 
 jobs:
   test:
