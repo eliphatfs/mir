@@ -30,8 +30,8 @@ jobs:
           run: |
             uname -a
             echo ::set-output name=uname::$(uname -a)
-            make test
             gcc mir.c mir-gen.c test3.c -Og -g -o test3 && ./test3
+            make test
       - name: print arch
         # Echo the `uname` output parameter from the `runcmd` step
         run: |

@@ -40,7 +40,7 @@ void run(int opt_lv) {
 int main() {
     // 64-bit machine
     if (sizeof(void*) == 8) {
-        int fd = open("./test-high-mov.tmp", O_RDWR | O_APPEND | O_CREAT);
+        int fd = open("./test-high-mov.tmp", O_RDWR | O_APPEND | O_CREAT, 0666);
         write(fd, "garbbarish", 10); lseek(fd, 0, SEEK_SET);
         if (fd == -1) printf("Create file failed\n");
         ptr = mmap(0xdeadbe0000, 8, PROT_WRITE, MAP_FIXED | MAP_PRIVATE, fd, 0);
