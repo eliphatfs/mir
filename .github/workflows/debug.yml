@@ -1,0 +1,35 @@
+name: mir-debug
+
+on: [workflow_dispatch]
+
+jobs:
+  test:
+
+    # The host should always be linux
+    runs-on: ubuntu-latest
+    name: Build on ${{ matrix.distro }} ${{ matrix.arch }}
+
+    # Run steps on a matrix of 3 arch/distro combinations
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            distro: fedora-latest
+
+    steps:
+      - uses: actions/checkout@v2.1.0
+      - uses: uraimo/run-on-arch-action@v2
+        name: test ${{ matrix.distro }} ${{ matrix.arch }}
+        id: build
+        with:
+          arch: ${{ matrix.arch }}
+          distro: ${{ matrix.distro }}
+        run: |
+          uname -a
+          echo ::set-output name=uname::$(uname -a)
+          make test
+          gcc mir.c mir-gen.c test3.c -Og -g -o test3 && ./test3
+      - name: print arch
+        # Echo the `uname` output parameter from the `runcmd` step
+        run: |
+          echo "The uname output was ${{ steps.runcmd.outputs.uname }}"
